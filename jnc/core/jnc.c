@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <jnc.h>
+#include <sys/mman.h>
+#include <memory.h>
 
 #define VMI(i, m) (unsigned char)((((i) << 4) & 0xF0)|((m) & 0xF))
 
@@ -136,11 +138,22 @@ jnc_obj* jnc_new_operatorobj(char op) {
     return (jnc_obj*)out_op;
 }
 
+typedef int (*translated_function)(void);
+
 int jnc_jumpInto(unsigned char* start_address, jnc_obj** return_obj) {
 
-    printf("Function jnc_jumpInto() not yet implemented.\n");
+    int retval = 0xFFFFFFFF;
+    
+    translated_function target_code = (translated_function)mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    memcpy((void*)target_code, (void*)start_address, 1024);
+    printf("Jumping into translated code...");
 
-    (*return_obj) = 0;
+    retval = target_code();
+
+    printf("Returned\n");
+
+    munmap((void*)target_code, 4096);
+    (*return_obj) = jnc_new_numberobj(retval);
 
     return 1;
 }
@@ -639,29 +652,69 @@ int jnc_translate(unsigned char* byte_code, unsigned char* machine_code, int cou
     int out_count = 0;
     int i;
 
+    //Write preamble
+    //machine_code[out_count++] = 0x50; //Push RAX //This would clobber our out value. Plus C returns in EAX
+    machine_code[out_count++] = 0x53; //Push RBX //Used in DROP 
+ 
     while(in_count < count) {
 
         switch(byte_code[in_count++]) {
 
             case VMI(VIP_LDA, VAM_IM):
-                machine_code[out_count++] = 0xB8; //Mov EAX immediate
+                machine_code[out_count++] = 0x48;
+                machine_code[out_count++] = 0xB8; //Mov RAX immediate
                 //Our VM is also little endian
                 machine_code[out_count++] = byte_code[in_count++];
                 machine_code[out_count++] = byte_code[in_count++];
                 machine_code[out_count++] = byte_code[in_count++];
                 machine_code[out_count++] = byte_code[in_count++];
+                //Pad to 64 bit with zeros
+                machine_code[out_count++] = 0;
+                machine_code[out_count++] = 0;
+                machine_code[out_count++] = 0;
+                machine_code[out_count++] = 0;
+            break;
+
+            case VMI(VIP_PUSH, 0):
+                machine_code[out_count++] = 0x50; //Push RAX
+            break;
+
+            case VMI(VIP_ADD, VAM_RI):
+                //This should really only handle the specific case of [SP], but it assumes they're all [SP]
+                in_count++; //Automatically consume the register spec
+                machine_code[out_count++] = 0x48; //ADD
+                machine_code[out_count++] = 0x03; //RAX,
+                machine_code[out_count++] = 0x04; //[RSP] //Need to check to make sure this works as expected on a 64-bit machine
+                machine_code[out_count++] = 0x24;
+            break;
+
+            case VMI(VIP_DROP, 0):
+                machine_code[out_count++] = 0x5B; //Pop RBX //Discard into RBX
             break;
 
             default:
                 
+                printf("Unhandled instrution, dumping progress:\n");
+
                 for(i = 0; i < out_count; i++)
-                    printf("%02X", machine_code[i]);
+                    printf("%02X ", machine_code[i]);
                 printf("\n");
 
                 return -1;
             break;
         }
     }
+
+    //Write postscript:
+    machine_code[out_count++] = 0x5B; //Pop EBX //Restore EBX
+    machine_code[out_count++] = 0xC3; //RET
+
+    //DEBUG
+    printf("Translation finished. Result:\n");
+
+    for(i = 0; i < out_count; i++)
+        printf("%02X ", machine_code[i]);
+    printf("\n");
 
     return 1;
 }
