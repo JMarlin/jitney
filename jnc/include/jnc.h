@@ -35,7 +35,7 @@ typedef struct jnc_operatorobj_struct {
 } jnc_operatorobj;
 
 int jnc_compile(char* source, unsigned char* dest_buf);
-int jnc_translate(unsigned char* byte_code, unsigned char* machine_code);
+int jnc_translate(unsigned char* byte_code, unsigned char* machine_code, int count);
 int jnc_jumpInto(unsigned char* start_address, jnc_obj** return_obj);
 void jnc_printObj(jnc_obj* object);
 void jnc_freeObj(jnc_obj* object);

@@ -586,10 +586,13 @@ void jnc_disassemble(unsigned char* code, int size) {
                 immval |= *(++code) << 8;
                 immval |= *(++code) << 16;
                 immval |= *(++code) << 24;
+                size -= 4;
                 printf("I 0x%X\n", immval);
             break;
 
             case VAM_RI:
+
+                size -= 1;
 
                 if(*(++code) == VRN_SP) {
                     printf(" [SP]\n");
@@ -627,12 +630,38 @@ int jnc_compile(char* source, unsigned char* dest_buf) {
     //DEBUG
     jnc_disassemble(dest_buf, byte_count);
 
-    return 1;
+    return byte_count;
 }
 
-int jnc_translate(unsigned char* byte_code, unsigned char* machine_code) {
+int jnc_translate(unsigned char* byte_code, unsigned char* machine_code, int count) {
 
-    printf("Function jnc_translate() not yet implemented.\n");
-    
+    int in_count = 0;
+    int out_count = 0;
+    int i;
+
+    while(in_count < count) {
+
+        switch(byte_code[in_count++]) {
+
+            case VMI(VIP_LDA, VAM_IM):
+                machine_code[out_count++] = 0xB8; //Mov EAX immediate
+                //Our VM is also little endian
+                machine_code[out_count++] = byte_code[in_count++];
+                machine_code[out_count++] = byte_code[in_count++];
+                machine_code[out_count++] = byte_code[in_count++];
+                machine_code[out_count++] = byte_code[in_count++];
+            break;
+
+            default:
+                
+                for(i = 0; i < out_count; i++)
+                    printf("%02X", machine_code[i]);
+                printf("\n");
+
+                return -1;
+            break;
+        }
+    }
+
     return 1;
 }
