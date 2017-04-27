@@ -4,6 +4,12 @@
 #include <sys/mman.h>
 #include <memory.h>
 
+#define ERR_UNKOWN_OP_SYM 0x01
+#define ERR_ZERO_LENGTH_NUM 0x02
+#define ERR_INV_CHAR_AFTER_OP 0x03
+#define ERR_LIST_EXPECTED 0x04
+#define ERR_CLOSING_BRACKET_EXPECTED 0x05
+
 #define VMI(i, m) (unsigned char)((((i) << 4) & 0xF0)|((m) & 0xF))
 
 #define VIP_ADD 0x1
@@ -81,61 +87,50 @@ void scanner_skipwhite(scan_wrapper* scan) {
         scanner_next(scan);
 }
 
-jnc_obj* jnc_new_listobj(void) {
+jnc_cons* jnc_new_atom(unsigned char type, int value) {
 
-    jnc_listobj* out_list = (jnc_listobj*)malloc(sizeof(jnc_listobj));
+    jnc_cons* out_cons = (jnc_cons*)malloc(sizeof(jnc_cons));
 
-    if(!out_list)
-        return (jnc_obj*)0;
+    if(!out_cons)
+        return (jnc_cons*)0;
 
-    out_list->obj.type = OT_LIST;
-    out_list->member_count = 0;
+    out_cons->type = type;
+    out_cons->value = value;
+    out_cons->next = 0;
 
-    return (jnc_obj*)out_list;
+    return out_cons;
+}
+
+void jnc_do_cons(jnc_cons* car, jnc_cons* cdr) {
+
+    car->next = cdr;
 }
 
 jnc_obj* jnc_new_numberobj(int number) {
 
-    jnc_numberobj* out_number = (jnc_numberobj*)malloc(sizeof(jnc_numberobj));
-
-    if(!out_number)
-        return (jnc_obj*)0;
-
-    out_number->obj.type = OT_NUMBER;
-    out_number->value = number;
-
-    return (jnc_obj*)out_number;
+    return jnc_new_atom(OT_NUMBER, number);
 }
 
-jnc_obj* jnc_new_errorobj(char* message) {
+jnc_obj* jnc_new_errorobj(int error_code) {
 
-    jnc_errorobj* out_error = (jnc_errorobj*)malloc(sizeof(jnc_errorobj));
-
-    if(!out_error)
-        return (jnc_obj*)0;
-
-    out_error->obj.type = OT_ERROR;
-    out_error->message = message;
-
-    return (jnc_obj*)out_error;
+    return jnc_new_atom(OT_ERROR, error_code);
 }
 
 jnc_obj* jnc_new_operatorobj(char op) {
 
     jnc_operatorobj* out_op = (jnc_operatorobj*)malloc(sizeof(jnc_operatorobj));
 
-    if(!out_op)
-        return (jnc_obj*)0;
+    int operation = op == '+' ? OP_ADD :
+                    op == '-' ? OP_SUB :
+                    op == '*' ? OP_MLT :
+                    op == '/' ? OP_DIV :
+                    op == '%' ? OP_MOD :
+                    0x0;
 
-    out_op->obj.type = OT_OPERATOR;
-    out_op->operation = op == '+' ? OP_ADD :
-                           op == '-' ? OP_SUB :
-                           op == '*' ? OP_MLT :
-                           op == '/' ? OP_DIV :
-                           op == '%' ? OP_MOD :
-                           0x0;
-
-    return (jnc_obj*)out_op;
+    if(op)
+        return jnc_new_atom(OT_OPERATOR, op);
+    else
+        return jnc_new_errorobj(ERR_UNKOWN_OP_SYM);
 }
 
 typedef int (*translated_function)(void);
@@ -158,22 +153,9 @@ int jnc_jumpInto(unsigned char* start_address, jnc_obj** return_obj) {
     return 1;
 }
 
-int jnc_insert_member(jnc_listobj** list_obj, jnc_obj* new_obj) {
+jnc_cons* parse_list_obj(scan_wrapper* scan);
 
-    (*list_obj)->member_count++;
-    (*list_obj) = (jnc_listobj*)realloc((*list_obj), sizeof(jnc_obj*) * (*list_obj)->member_count + sizeof(jnc_listobj));
-    
-    if(!(*list_obj))
-        return -1;
-
-    (*list_obj)->member[(*list_obj)->member_count - 1] = new_obj;
-
-    return 1;
-}
-
-jnc_obj* parse_list_obj(scan_wrapper* scan);
-
-jnc_obj* parse_decimal_obj(scan_wrapper* scan) {
+jnc_cons* parse_decimal_obj(scan_wrapper* scan) {
 
     int number = 0;
     int is_negative = 0;
@@ -206,7 +188,7 @@ jnc_obj* parse_decimal_obj(scan_wrapper* scan) {
     }
 
     if(!digits)
-        return jnc_new_errorobj("Encountered a zero-length number");
+        return jnc_new_errorobj(ERR_ZERO_LENGTH_NUM);
 
     if(is_negative)
         number *= -1;
@@ -216,10 +198,10 @@ jnc_obj* parse_decimal_obj(scan_wrapper* scan) {
     if(!scanner_iswhite(scan) && scanner_value(scan) != ']')
         return jnc_new_errorobj("Invalid character at the end of decimal literal");
 
-    return (jnc_obj*)jnc_new_numberobj(number);
+    return jnc_new_numberobj(number);
 }
 
-jnc_obj* parse_operator_obj(scan_wrapper* scan) {
+jnc_cons* parse_operator_obj(scan_wrapper* scan) {
 
     char op = 0;
 
@@ -236,18 +218,18 @@ jnc_obj* parse_operator_obj(scan_wrapper* scan) {
     }
 
     if(!op)
-        return jnc_new_errorobj("Unrecognized operator type");
+        return jnc_new_errorobj(ERR_UNKOWN_OP_SYM);
 
     scanner_next(scan);
     if(!scanner_iswhite(scan) && scanner_value(scan) != ']')
-        return jnc_new_errorobj("Invalid character following operator");
+        return jnc_new_errorobj(ERR_INV_CHAR_AFTER_OP);
 
     return jnc_new_operatorobj(op);
 }
 
-jnc_obj* jnc_parse_object(scan_wrapper* scan) {
+jnc_cons* jnc_parse_object(scan_wrapper* scan) {
 
-    jnc_obj* ret_obj;
+    jnc_cons* ret_obj;
 
     //Try parsing as list 
     scanner_set_undo_point(scan);
@@ -284,19 +266,22 @@ jnc_obj* jnc_parse_object(scan_wrapper* scan) {
     return jnc_new_errorobj("Failed to detect type of next value");
 }
 
-jnc_obj* parse_list_obj(scan_wrapper* scan) {
+//THIS NEEDS TO BE TWEAKED
+//WE SHOULD JUST BE RETURNING A STANDARD CONS CELL WITH THE 
+//FIRST OBJECT VALUE AND POINTING TO THE REST OF THE LIST UNLESS
+//THE NEXT OBJET WE PARSED -- ASDLKJASKJDfh I don't know, this needs review to handle nested lists properly in the CONS way
+jnc_cons* parse_list_obj(scan_wrapper* scan) {
     
-    jnc_listobj* out_list;
-    jnc_obj* new_child;
+    jnc_cons* out_list = jnc_new_atom(OT_LIST, 0);
+    jnc_cons* new_child;
+    jnc_cons* prev_child;
+    int found_first = 0;
 
     scanner_skipwhite(scan);    
 
     if(scanner_value(scan) != '[')
-        return jnc_new_errorobj("Expected list beginning with '['");
+        return jnc_new_errorobj(ERR_LIST_EXPECTED);
     
-    if(!(out_list = (jnc_listobj*)jnc_new_listobj()))
-        return (jnc_obj*)0;
-
     scanner_next(scan); //Consume the leading bracket
     scanner_skipwhite(scan);
 
@@ -304,15 +289,15 @@ jnc_obj* parse_list_obj(scan_wrapper* scan) {
 
         if(scan->eof) {
 
-            jnc_freeObj((jnc_obj*)out_list);
-            return jnc_new_errorobj("Expected closing ']' at end of list");
+            jnc_freeObj(out_list);
+            return jnc_new_errorobj(ERR_CLOSING_BRACKET_EXPECTED);
         }
 
         new_child = jnc_parse_object(scan);
 
         if(!new_child) {
 
-            jnc_freeObj((jnc_obj*)out_list);
+            jnc_freeObj(out_list);
             return jnc_new_errorobj("Failure trying to allocate a new object");
         }
 
@@ -322,12 +307,12 @@ jnc_obj* parse_list_obj(scan_wrapper* scan) {
             return new_child;
         }
 
-        if(jnc_insert_member(&out_list, new_child) < 1) {
+        if(prev_child) 
+            jnc_do_cons(prev_child, new_child);            
+        else
+            out_list->value = (int)new_child;
 
-            jnc_freeObj((jnc_obj*)out_list); 
-            jnc_freeObj(new_child);
-            return jnc_new_errorobj("Failure trying to insert member into list object");
-        }
+        prev_child = new_child;
 
         scanner_skipwhite(scan);
     }
@@ -335,13 +320,13 @@ jnc_obj* parse_list_obj(scan_wrapper* scan) {
     //Consume the closing bracket
     scanner_next(scan);
 
-    return (jnc_obj*)out_list;
+    return out_list;
 }
 
-int jnc_objectify(char* source, jnc_obj** out_object) {
+int jnc_objectify(char* source, jnc_cons** out_object) {
     
     scan_wrapper scan = {source, 0, 0, 0, 0, 0, 0, 0}; 
-    jnc_obj* source_tree;
+    jnc_cons* source_tree;
 
     source_tree = parse_list_obj(&scan);
     
@@ -353,7 +338,7 @@ int jnc_objectify(char* source, jnc_obj** out_object) {
 
     if(source_tree->type == OT_ERROR) {
 
-        printf("Parse error [%i, %i]: %s\n", scan.row, scan.col, ((jnc_errorobj*)source_tree)->message);
+        printf("Parse error [%i, %i]: %s\n", scan.row, scan.col, errval[source_tree->value]);
         jnc_freeObj(source_tree);
         return -2;
     }
@@ -369,32 +354,25 @@ int jnc_objectify(char* source, jnc_obj** out_object) {
     return 1;
 }
 
-void jnc_freeObj(jnc_obj* object) {
-
-    jnc_listobj* obj_list;
-    int i;
+void jnc_freeObj(jnc_cons* object) {
 
     if(!object)
         return;
 
     if(object->type == OT_LIST) {
-
-        obj_list = (jnc_listobj*)object;
-
-        for(i = 0; i < obj_list->member_count; i++)
-            jnc_freeObj(obj_list->member[i]);
+    
+        jnc_freeObj((jnc_cons*)object->value);
     }
 
+    jnc_freeObj(objet->next);
     free(object);
 }
 
 void jnc_printObj(jnc_obj* object) {
-
-    jnc_operatorobj* obj_op = (jnc_operatorobj*)object;
-
+ 
     if(!object) {
 
-        printf("|NULL_PTR|");
+        printf("]");
         return;
     }
 
@@ -403,18 +381,8 @@ void jnc_printObj(jnc_obj* object) {
         case OT_LIST:
 
             printf("[");
-
-            int i;
-
-            for(i = 0; i < ((jnc_listobj*)object)->member_count; i++) {
-
-                if(i > 0)
-                    printf(" ");
-
-                jnc_printObj(((jnc_listobj*)object)->member[i]);
-            }
-        
-            printf("]");
+            
+            jnc_printObj((jnc_cons*)object->value);
         break;
 
         case OT_NUMBER:
@@ -437,9 +405,13 @@ void jnc_printObj(jnc_obj* object) {
 
             printf("|UNKNOWN_TYPE:'0x%X'|", (unsigned int)object->type);
         break;
-    }    
+    }
+
+    jnc_printObj(object->next);    
 }
 
+//THIS CAN BASICALLY BE REMOVED SINCE OUR TREES AND OUR BYTECODE ARE BOTH THE
+//SAME BINARY S-EXPRESSION FORMAT
 int jnc_tree_to_bytecode(jnc_obj* tree, unsigned char* dest_buf, int* buf_loc) {
 
     jnc_listobj* obj_list;
@@ -538,6 +510,7 @@ int jnc_tree_to_bytecode(jnc_obj* tree, unsigned char* dest_buf, int* buf_loc) {
     return -1;
 }
 
+//THIS CAN ALSO BE REMOVED SINCE REALLY THIS IS THE SAME THING AS PRINTING THE TREE NOW
 void jnc_disassemble(unsigned char* code, int size) {
 
     int immval;
@@ -637,15 +610,19 @@ int jnc_compile(char* source, unsigned char* dest_buf) {
     jnc_printObj(source_tree);
     printf("\n");
 
+    //THIS NEEDS TO BE REPLACED WITH A FUNCTION THAT TAKES THE FRAGMENTED TREE WE PRODUCED
+    //AND CONSOLIDATES IT DOWN INTO A LINEAR BUFFER WITH ADJUSTED POINTER VALUES 
     if(jnc_tree_to_bytecode(source_tree, dest_buf, &byte_count) < 0)
         return -2;
 
     //DEBUG
+    //REPLACE THIS WITH A PRINT OF THE CONSOLIDATED TREE IN THE BUFFER 
     jnc_disassemble(dest_buf, byte_count);
 
     return byte_count;
 }
 
+//THIS NEEDS TO BE SERIOUSLY UPDATED TO CONVERT OUR CONSOLIDATED TREE INTO X86 CODE
 int jnc_translate(unsigned char* byte_code, unsigned char* machine_code, int count) {
 
     int in_count = 0;
