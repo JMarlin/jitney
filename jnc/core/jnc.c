@@ -684,7 +684,16 @@ int jnc_translate(unsigned char* byte_code, unsigned char* machine_code, int cou
                 in_count++; //Automatically consume the register spec
                 machine_code[out_count++] = 0x48; //ADD
                 machine_code[out_count++] = 0x03; //RAX,
-                machine_code[out_count++] = 0x04; //[RSP] //Need to check to make sure this works as expected on a 64-bit machine
+                machine_code[out_count++] = 0x04; //[RSP] 
+                machine_code[out_count++] = 0x24;
+            break;
+
+            case VMI(VIP_SUB, VAM_RI):
+                //This should really only handle the specific case of [SP], but it assumes they're all [SP]
+                in_count++; //Automatically consume the register spec
+                machine_code[out_count++] = 0x48; //SUB
+                machine_code[out_count++] = 0x2B; //RAX,
+                machine_code[out_count++] = 0x04; //[RSP] 
                 machine_code[out_count++] = 0x24;
             break;
 
