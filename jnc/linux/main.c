@@ -7,7 +7,7 @@ int main(int argc, char* argv[]) {
     char inbuf[255] = {0};
     unsigned char bc_buf[1024] = {0};
     unsigned char exec_buf[1024] = {0};
-    jnc_obj* return_obj;
+    jnc_cons* return_obj;
     int count;
 
     //This is the REPL loop

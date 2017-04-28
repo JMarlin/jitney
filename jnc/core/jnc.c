@@ -9,6 +9,21 @@
 #define ERR_INV_CHAR_AFTER_OP 0x03
 #define ERR_LIST_EXPECTED 0x04
 #define ERR_CLOSING_BRACKET_EXPECTED 0x05
+#define ERR_INV_CHAR_IN_DECIMAL_LIT 0x06
+#define ERR_COULDNT_PARSE_NEXT 0x7
+#define ERR_OBJ_ALLOCATION 0x8
+
+const char* errval[] = {
+    "Unkown error",
+    "Encountered an unrecognized operator symbol",
+    "Encountered a number object of zero length",
+    "Encountered an invalid character following operator symbol",
+    "Was expecting a list (opening bracket character)",
+    "Was expecting a closing bracket",
+    "Invalid character found in decimal literal",
+    "Was unable to parse next symbol",
+    "Failed to allocate memory for new atom"
+};
 
 #define VMI(i, m) (unsigned char)((((i) << 4) & 0xF0)|((m) & 0xF))
 
@@ -106,19 +121,17 @@ void jnc_do_cons(jnc_cons* car, jnc_cons* cdr) {
     car->next = cdr;
 }
 
-jnc_obj* jnc_new_numberobj(int number) {
+jnc_cons* jnc_new_numberobj(int number) {
 
     return jnc_new_atom(OT_NUMBER, number);
 }
 
-jnc_obj* jnc_new_errorobj(int error_code) {
+jnc_cons* jnc_new_errorobj(int error_code) {
 
     return jnc_new_atom(OT_ERROR, error_code);
 }
 
-jnc_obj* jnc_new_operatorobj(char op) {
-
-    jnc_operatorobj* out_op = (jnc_operatorobj*)malloc(sizeof(jnc_operatorobj));
+jnc_cons* jnc_new_operatorobj(char op) {
 
     int operation = op == '+' ? OP_ADD :
                     op == '-' ? OP_SUB :
@@ -128,16 +141,16 @@ jnc_obj* jnc_new_operatorobj(char op) {
                     0x0;
 
     if(op)
-        return jnc_new_atom(OT_OPERATOR, op);
+        return jnc_new_atom(OT_OPERATOR, operation);
     else
         return jnc_new_errorobj(ERR_UNKOWN_OP_SYM);
 }
 
-typedef int (*translated_function)(void);
+typedef jnc_cons* (*translated_function)(void);
 
-int jnc_jumpInto(unsigned char* start_address, jnc_obj** return_obj) {
+int jnc_jumpInto(unsigned char* start_address, jnc_cons** return_obj) {
 
-    int retval = 0xFFFFFFFF;
+    jnc_cons* retval = (jnc_cons*)0xFFFFFFFF;
     
     translated_function target_code = (translated_function)mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
     memcpy((void*)target_code, (void*)start_address, 1024);
@@ -148,7 +161,7 @@ int jnc_jumpInto(unsigned char* start_address, jnc_obj** return_obj) {
     printf("Returned\n");
 
     munmap((void*)target_code, 4096);
-    (*return_obj) = jnc_new_numberobj(retval);
+    (*return_obj) = retval;
 
     return 1;
 }
@@ -159,7 +172,6 @@ jnc_cons* parse_decimal_obj(scan_wrapper* scan) {
 
     int number = 0;
     int is_negative = 0;
-    jnc_numberobj* out_number;
     char val;
     int digits = 0;
 
@@ -196,7 +208,7 @@ jnc_cons* parse_decimal_obj(scan_wrapper* scan) {
     //Make sure the number is terminated by a delimiter
     //or a list close bracket
     if(!scanner_iswhite(scan) && scanner_value(scan) != ']')
-        return jnc_new_errorobj("Invalid character at the end of decimal literal");
+        return jnc_new_errorobj(ERR_INV_CHAR_IN_DECIMAL_LIT);
 
     return jnc_new_numberobj(number);
 }
@@ -263,18 +275,14 @@ jnc_cons* jnc_parse_object(scan_wrapper* scan) {
 
     scanner_undo(scan);
 
-    return jnc_new_errorobj("Failed to detect type of next value");
+    return jnc_new_errorobj(ERR_COULDNT_PARSE_NEXT);
 }
 
-//THIS NEEDS TO BE TWEAKED
-//WE SHOULD JUST BE RETURNING A STANDARD CONS CELL WITH THE 
-//FIRST OBJECT VALUE AND POINTING TO THE REST OF THE LIST UNLESS
-//THE NEXT OBJET WE PARSED -- ASDLKJASKJDfh I don't know, this needs review to handle nested lists properly in the CONS way
 jnc_cons* parse_list_obj(scan_wrapper* scan) {
     
-    jnc_cons* out_list = jnc_new_atom(OT_LIST, 0);
+    jnc_cons* out_list = jnc_new_atom(OT_CONS, 0);
     jnc_cons* new_child;
-    jnc_cons* prev_child;
+    jnc_cons* prev_child = 0;
     int found_first = 0;
 
     scanner_skipwhite(scan);    
@@ -298,19 +306,19 @@ jnc_cons* parse_list_obj(scan_wrapper* scan) {
         if(!new_child) {
 
             jnc_freeObj(out_list);
-            return jnc_new_errorobj("Failure trying to allocate a new object");
+            return jnc_new_errorobj(ERR_OBJ_ALLOCATION);
         }
 
         if(new_child->type == OT_ERROR) {
 
-            jnc_freeObj((jnc_obj*)out_list);
+            jnc_freeObj(out_list);
             return new_child;
         }
 
         if(prev_child) 
             jnc_do_cons(prev_child, new_child);            
         else
-            out_list->value = (int)new_child;
+            out_list->value = (uint64_t)new_child;
 
         prev_child = new_child;
 
@@ -343,7 +351,7 @@ int jnc_objectify(char* source, jnc_cons** out_object) {
         return -2;
     }
 
-    if(source_tree->type != OT_LIST) {
+    if(source_tree->type != OT_CONS) {
 
         printf("Parse error: Root object MUST be a list\n");
         return -3;
@@ -359,248 +367,146 @@ void jnc_freeObj(jnc_cons* object) {
     if(!object)
         return;
 
-    if(object->type == OT_LIST) {
+    if(object->type == OT_CONS) {
     
         jnc_freeObj((jnc_cons*)object->value);
     }
 
-    jnc_freeObj(objet->next);
+    jnc_freeObj(object->next);
     free(object);
 }
 
-void jnc_printObj(jnc_obj* object) {
- 
-    if(!object) {
-
-        printf("]");
-        return;
-    }
+void jnc_printInner(jnc_cons* object, int nesting, int list_index) {
+   
+    if(list_index > 0)
+        printf(" ");
 
     switch(object->type) {
 
-        case OT_LIST:
+        case OT_CONS:
+
+            if(nesting > 0) {
+
+                printf("\n");
+                
+                int i;
+                for(i = 0; i < nesting; i++)
+                    printf("    ");
+            }
 
             printf("[");
             
-            jnc_printObj((jnc_cons*)object->value);
+            jnc_printInner((jnc_cons*)object->value, nesting + 1, 0);
         break;
 
         case OT_NUMBER:
 
-            printf("%i", ((jnc_numberobj*)object)->value);
+            printf("%i", (int)object->value);
         break;
 
-        case OT_OPERATOR:            
+        case OT_OPERATOR:                       
 
-            printf(obj_op->operation == OP_ADD ? "+" :
-                   obj_op->operation == OP_SUB ? "-" :
-                   obj_op->operation == OP_MLT ? "*" :
-                   obj_op->operation == OP_DIV ? "/" :
-                   obj_op->operation == OP_MOD ? "%%" :
+            printf(object->value == OP_ADD ? "+" :
+                   object->value == OP_SUB ? "-" :
+                   object->value == OP_MLT ? "*" :
+                   object->value == OP_DIV ? "/" :
+                   object->value == OP_MOD ? "%%" :
                    "|UNKNOWN_OPERATION|");
 
         break;
 
         default:
 
-            printf("|UNKNOWN_TYPE:'0x%X'|", (unsigned int)object->type);
+            printf("|UNKNOWN_TYPE:'0x%X'|", (int)object->type);
         break;
     }
 
-    jnc_printObj(object->next);    
+    if(!object->next) {
+
+        if(nesting != 0) printf("]");
+        return;
+    } else {
+
+        jnc_printInner(object->next, nesting, list_index + 1);    
+    }
 }
 
-//THIS CAN BASICALLY BE REMOVED SINCE OUR TREES AND OUR BYTECODE ARE BOTH THE
-//SAME BINARY S-EXPRESSION FORMAT
-int jnc_tree_to_bytecode(jnc_obj* tree, unsigned char* dest_buf, int* buf_loc) {
+void jnc_printObj(jnc_cons* object) {
 
-    jnc_listobj* obj_list;
-    jnc_numberobj* obj_number;
-
-    //If we're a literal, we just need to emit a load immediate
-    if(tree->type == OT_NUMBER) {
-
-        obj_number = (jnc_numberobj*)tree;
-
-        dest_buf[(*buf_loc)++] = VMI(VIP_LDA, VAM_IM);
-        dest_buf[(*buf_loc)++] = (unsigned char)(obj_number->value & 0xFF);
-        dest_buf[(*buf_loc)++] = (unsigned char)((obj_number->value >> 8) & 0xFF);
-        dest_buf[(*buf_loc)++] = (unsigned char)((obj_number->value >> 16) & 0xFF);
-        dest_buf[(*buf_loc)++] = (unsigned char)((obj_number->value >> 24) & 0xFF);
-        
-        return 1;
-    }
-
-    //If we're a tree then we evaluate as an expression
-    if(tree->type == OT_LIST) {
-            
-        obj_list = (jnc_listobj*)tree;
-
-        if(obj_list->member_count == 0) {
-
-            printf("Compile Error: Encountered an empty list where an expression was expected.\n");
-            return -2;
-        }
-
-        if(obj_list->member[0]->type != OT_OPERATOR) {
-
-            printf("Compile Error: Expressions must begin with an operator /*or function*/\n");
-            return -3;
-        }
-
-        if(obj_list->member_count < 3) {
-
-            printf("Compile Error: Too few arguments to operation. All current operations are binary.\n");
-            return -4;
-        }
-
-        int i;
-
-        //Insert argument value calculations
-        for(i = obj_list->member_count - 1; i > 0; i--) {
-
-            if(jnc_tree_to_bytecode(obj_list->member[i], dest_buf, buf_loc) < 0)
-                return -1;
-
-            //Push the accumulator value onto the stack if not the leading argument
-            if(i != 1)
-                dest_buf[(*buf_loc)++] = VMI(VIP_PUSH, 0);
-        }
-
-        //Apply operator to values
-        for(i = 0; i < obj_list->member_count - 2; i++) {
-
-            switch(((jnc_operatorobj*)(obj_list->member[0]))->operation) {
-
-                case OP_ADD:
-                    dest_buf[(*buf_loc)++] = VMI(VIP_ADD, VAM_RI);
-                break;
-
-                case OP_SUB:
-                    dest_buf[(*buf_loc)++] = VMI(VIP_SUB, VAM_RI);
-                break;
-
-                case OP_MLT:
-                    dest_buf[(*buf_loc)++] = VMI(VIP_MLT, VAM_RI);
-                break;
-
-                case OP_DIV:
-                    dest_buf[(*buf_loc)++] = VMI(VIP_DIV, VAM_RI);
-                break;
-
-                case OP_MOD:
-                    dest_buf[(*buf_loc)++] = VMI(VIP_MOD, VAM_RI);
-                break;
-
-                default:
-
-                    printf("Compile Error: Encountered unknown operator of type 0x%X\n", ((jnc_operatorobj*)(obj_list->member[0]))->operation);
-                    return -1;
-                break;
-            }
-
-            dest_buf[(*buf_loc)++] = VRN_SP;
-            dest_buf[(*buf_loc)++] = VMI(VIP_DROP, 0);
-        }
-
-        return 1;
-    }
-
-    printf("Compile Error: Node was neither a list or a literal\n");
-    return -1;
+    jnc_printInner(object, 0, 0);
 }
 
-//THIS CAN ALSO BE REMOVED SINCE REALLY THIS IS THE SAME THING AS PRINTING THE TREE NOW
-void jnc_disassemble(unsigned char* code, int size) {
+int jnc_condense_cons(jnc_cons* root_cons, unsigned char* out_buf, uint64_t* count, uint64_t base) {
 
-    int immval;
+    unsigned char* cdr_ptr;
+    jnc_cons* next_ptr;
 
-    while(size) {
+    //Start by shoving the type into the buffer 
+    *(out_buf++) = root_cons->type;
+    
+    //Denote that we're shoving another cons into the buf 
+    (*count) += 17;
 
-        printf("0x%02X: ", *code);
+    if(root_cons->type == OT_CONS) {           
 
-        switch(((*code) & 0xF0) >> 4) {
+        //Insert the 'next' value into the value slot
+        *(out_buf++) = (unsigned char)(((*count)+base) & 0xFF);
+        *(out_buf++) = (unsigned char)((((*count)+base) >> 8) & 0xFF);
+        *(out_buf++) = (unsigned char)((((*count)+base) >> 16) & 0xFF);
+        *(out_buf++) = (unsigned char)((((*count)+base) >> 24) & 0xFF);
+        *(out_buf++) = (unsigned char)((((*count)+base) >> 32) & 0xFF);
+        *(out_buf++) = (unsigned char)((((*count)+base) >> 40) & 0xFF);
+        *(out_buf++) = (unsigned char)((((*count)+base) >> 48) & 0xFF);
+        *(out_buf++) = (unsigned char)((((*count)+base) >> 56) & 0xFF);
 
-            case VIP_ADD:
-                printf("ADD");
-            break;
+        //Save the location that we should store the CDR value at 
+        cdr_ptr = out_buf;
 
-            case VIP_SUB:
-                printf("SUB");
-            break;
+        //Increment past the cdr location
+        out_buf += 8; 
 
-            case VIP_MLT:
-                printf("MLT");
-            break;
+        //Process and insert the left branch
+        if(jnc_condense_cons((jnc_cons*)root_cons->value, out_buf, count, base) < 0)
+            return -1;
 
-            case VIP_DIV:
-                printf("DIV");
-            break;
+    } else {
 
-            case VIP_MOD:
-                printf("MOD");
-            break;
+        //Insert the raw value 
+        *(out_buf++) = (unsigned char)(root_cons->value & 0xFF);
+        *(out_buf++) = (unsigned char)((root_cons->value >> 8) & 0xFF);
+        *(out_buf++) = (unsigned char)((root_cons->value >> 16) & 0xFF);
+        *(out_buf++) = (unsigned char)((root_cons->value >> 24) & 0xFF);
+        *(out_buf++) = (unsigned char)((root_cons->value >> 32) & 0xFF);
+        *(out_buf++) = (unsigned char)((root_cons->value >> 40) & 0xFF);
+        *(out_buf++) = (unsigned char)((root_cons->value >> 48) & 0xFF);
+        *(out_buf++) = (unsigned char)((root_cons->value >> 56) & 0xFF);
 
-            case VIP_LDA:
-                printf("LDA");
-            break;
-
-            case VIP_PUSH:
-                printf("PUSH\n");
-                code++; size--;
-                continue;
-            break;
-
-            case VIP_DROP:
-                printf("DROP\n");
-                code++; size--;
-                continue;
-            break;
-
-            default:
-                printf("???\n");
-                code++; size--;
-                continue;
-            break; 
-        }
-
-        switch((*code) & 0xF) {
-
-            case VAM_IM:
-                immval = 0;
-                immval |= *(++code);
-                immval |= *(++code) << 8;
-                immval |= *(++code) << 16;
-                immval |= *(++code) << 24;
-                size -= 4;
-                printf("I 0x%X\n", immval);
-            break;
-
-            case VAM_RI:
-
-                size -= 1;
-
-                if(*(++code) == VRN_SP) {
-                    printf(" [SP]\n");
-                } else {
-                    printf(" [?]\n");
-                }
-            break;
-
-            default:
-                printf("?\n");
-            break;
-        }
-
-        code++; size--;
-        continue;
+        cdr_ptr = out_buf;
+        out_buf += 8; 
     }
+
+    next_ptr = root_cons->next == 0 ? 0 : (jnc_cons*)((*count)+base);
+
+    *(cdr_ptr++) = (unsigned char)((uint64_t)next_ptr & 0xFF);
+    *(cdr_ptr++) = (unsigned char)(((uint64_t)next_ptr >> 8) & 0xFF);
+    *(cdr_ptr++) = (unsigned char)(((uint64_t)next_ptr >> 16) & 0xFF);
+    *(cdr_ptr++) = (unsigned char)(((uint64_t)next_ptr >> 24) & 0xFF);
+    *(cdr_ptr++) = (unsigned char)(((uint64_t)next_ptr >> 32) & 0xFF);
+    *(cdr_ptr++) = (unsigned char)(((uint64_t)next_ptr >> 40) & 0xFF);
+    *(cdr_ptr++) = (unsigned char)(((uint64_t)next_ptr >> 48) & 0xFF);
+    *(cdr_ptr++) = (unsigned char)(((uint64_t)next_ptr >> 56) & 0xFF);
+
+    if(!root_cons->next)
+        return 1;
+
+    if(jnc_condense_cons(root_cons->next, out_buf, count, base) < 0)
+        return -1;
 }
 
 int jnc_compile(char* source, unsigned char* dest_buf) {
 
-    jnc_obj* source_tree;
-    int byte_count = 0;    
+    jnc_cons* source_tree;
+    uint64_t byte_count = 0;    
 
     if(jnc_objectify(source, &source_tree) < 0)
         return -1;
@@ -610,14 +516,20 @@ int jnc_compile(char* source, unsigned char* dest_buf) {
     jnc_printObj(source_tree);
     printf("\n");
 
-    //THIS NEEDS TO BE REPLACED WITH A FUNCTION THAT TAKES THE FRAGMENTED TREE WE PRODUCED
-    //AND CONSOLIDATES IT DOWN INTO A LINEAR BUFFER WITH ADJUSTED POINTER VALUES 
-    if(jnc_tree_to_bytecode(source_tree, dest_buf, &byte_count) < 0)
+    if(jnc_condense_cons(source_tree, dest_buf, &byte_count, (uint64_t)dest_buf) < 0)
         return -2;
+
+    printf("%016" PRIx64 " : ", (uint64_t)dest_buf);
+
+    int i;
+    for(i = 0; i < 256; i++)
+        printf("%02X ", ((unsigned char*)dest_buf)[i]);
 
     //DEBUG
     //REPLACE THIS WITH A PRINT OF THE CONSOLIDATED TREE IN THE BUFFER 
-    jnc_disassemble(dest_buf, byte_count);
+    printf("Condensed binary result:\n");
+    jnc_printObj((jnc_cons*)dest_buf);
+    printf("\n");
 
     return byte_count;
 }
